@@ -80,8 +80,9 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
 
         /// <summary>
         /// Face API key
+        /// https://www.microsoft.com/cognitive-services/
         /// </summary>
-        private string faceAPIKey = "f8c7e6233add4c7c9205e8b2c1e7c6fa";
+        private string faceAPIKey = "Your Key";
 
         /// <summary>
         /// enable/disable face detection, default is false
