@@ -23,9 +23,11 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
     using System.Windows.Shapes;
     using System.Windows.Controls;
     using System.Diagnostics;
-    /// <summary>
-    /// Interaction logic for the MainWindow
-    /// </summary>
+    using Microsoft.Kinect.Face;
+    using System.Collections.Generic;
+    using ProjectOxford.Emotion.Contract;/// <summary>
+                                         /// Interaction logic for the MainWindow
+                                         /// </summary>
     public partial class MainWindow : Window, INotifyPropertyChanged
     {
         /// <summary>
@@ -74,29 +76,38 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
         private string statusText = null;
 
         /// <summary>
-        /// Face service client
-        /// </summary>
-        private IFaceServiceClient _faceServiceClient = null;
-
-        /// <summary>
         /// Face API key
         /// https://www.microsoft.com/cognitive-services/
         /// </summary>
-        private string faceAPIKey = "Your Key";
+        private string faceAPIKey = "6171d608d75f4e47b0a836d16898c1f7";
+        private string emotionAPIKey = "df245a9e77ac4a129b9f21080aa1ee43";
+
+        private FaceDetector faceDetector;
 
         /// <summary>
         /// enable/disable face detection, default is false
         /// </summary>
         private bool enableFaceDetect = false;
 
+
+        private FaceFrameSource[] faceFrameSources = null;
+
         /// <summary>
-        /// process the face detection one by one
+        /// Face frame readers
         /// </summary>
-        bool faceProcessing = false;
+        private FaceFrameReader[] faceFrameReaders = null;
+
+        /// <summary>
+        /// Storage for face frame results
+        /// </summary>
+        private FaceFrameResult[] faceFrameResults = null;
+
+        private int bodyCount;
+        private List<Brush> faceBrush;
 
         Rectangle faceBoundingBox = new Rectangle();
-        
 
+   
         /// <summary>
         /// encoder to save the frame to a memorystream as jpeg
         /// </summary>
@@ -123,6 +134,48 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
             // this.infraredBitmap = new WriteableBitmap(this.infraredFrameDescription.Width, this.infraredFrameDescription.Height, 96.0, 96.0, PixelFormats.Gray32Float, null);
             this.infraredBitmap = new WriteableBitmap(this.infraredFrameDescription.Width, this.infraredFrameDescription.Height, 96.0, 96.0, PixelFormats.Gray32Float, null);
 
+            this.bodyCount = this.kinectSensor.BodyFrameSource.BodyCount;
+
+            // specify the required face frame results
+            FaceFrameFeatures faceFrameFeatures =
+                FaceFrameFeatures.BoundingBoxInColorSpace
+                | FaceFrameFeatures.PointsInColorSpace
+                | FaceFrameFeatures.RotationOrientation
+                | FaceFrameFeatures.FaceEngagement
+                | FaceFrameFeatures.Glasses
+                | FaceFrameFeatures.Happy
+                | FaceFrameFeatures.LeftEyeClosed
+                | FaceFrameFeatures.RightEyeClosed
+                | FaceFrameFeatures.LookingAway
+                | FaceFrameFeatures.MouthMoved
+                | FaceFrameFeatures.MouthOpen;
+
+            // create a face frame source + reader to track each face in the FOV
+            this.faceFrameSources = new FaceFrameSource[this.bodyCount];
+            this.faceFrameReaders = new FaceFrameReader[this.bodyCount];
+            for (int i = 0; i < this.bodyCount; i++)
+            {
+                // create the face frame source with the required face frame features and an initial tracking Id of 0
+                this.faceFrameSources[i] = new FaceFrameSource(this.kinectSensor, 0, faceFrameFeatures);
+
+                // open the corresponding reader
+                this.faceFrameReaders[i] = this.faceFrameSources[i].OpenReader();
+            }
+
+            // allocate storage to store face frame results for each face in the FOV
+            this.faceFrameResults = new FaceFrameResult[this.bodyCount];
+
+            // populate face result colors - one for each face index
+            this.faceBrush = new List<Brush>()
+            {
+                Brushes.White,
+                Brushes.Orange,
+                Brushes.Green,
+                Brushes.Red,
+                Brushes.LightBlue,
+                Brushes.Yellow
+            };
+
             // set IsAvailableChanged event notifier
             this.kinectSensor.IsAvailableChanged += this.Sensor_IsAvailableChanged;
 
@@ -136,15 +189,22 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
             // use the window object as the view model in this simple example
             this.DataContext = this;
 
-            // Initialize the face service client
-            _faceServiceClient = new FaceServiceClient(faceAPIKey);
+            faceDetector = new FaceDetector(faceAPIKey, emotionAPIKey);
+            faceDetector.DetectedFaces += DetectedFaces;
 
             faceBoundingBox.Stroke = new SolidColorBrush(Colors.Red);
 
             // initialize the components (controls) of the window
             this.InitializeComponent();
 
-
+            for (int i = 0; i < this.bodyCount; i++)
+            {
+                if (this.faceFrameReaders[i] != null)
+                {
+                    // wire handler for face frame arrival
+                    this.faceFrameReaders[i].FrameArrived += this.Reader_FaceFrameArrived;
+                }
+            }
         }
 
         /// <summary>
@@ -207,6 +267,23 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
                 this.kinectSensor.Close();
                 this.kinectSensor = null;
             }
+
+            for (int i = 0; i < this.bodyCount; i++)
+            {
+                if (this.faceFrameReaders[i] != null)
+                {
+                    // FaceFrameReader is IDisposable
+                    this.faceFrameReaders[i].Dispose();
+                    this.faceFrameReaders[i] = null;
+                }
+
+                if (this.faceFrameSources[i] != null)
+                {
+                    // FaceFrameSource is IDisposable
+                    this.faceFrameSources[i].Dispose();
+                    this.faceFrameSources[i] = null;
+                }
+            }
         }
 
         /// <summary>
@@ -219,46 +296,7 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
             enableFaceDetect = !enableFaceDetect;
         }
 
-        /// <summary>
-        /// Upload the frame and get the face detect result
-        /// </summary>
-        private async Task<FaceRectangle[]> UploadAndDetectFaces()
-        {
-            if (this.infraredBitmap == null)
-            {
-                return new FaceRectangle[0];
-            }
-
-            BitmapEncoder faceDetectEncoder = new JpegBitmapEncoder();
-            // create frame from the writable bitmap and add to encoder
-            faceDetectEncoder.Frames.Add(BitmapFrame.Create(this.infraredBitmap));
-
-            MemoryStream imageFileStream = new MemoryStream();
-
-            faceDetectEncoder.Save(imageFileStream);
-            imageFileStream.Position = 0;
-
-            if (!faceProcessing)
-            {
-                faceProcessing = true;
-                //Thread.Sleep(300);
-                try
-                {
-                    var faces = await _faceServiceClient.DetectAsync(imageFileStream);
-                    var faceRects = faces.Select(face => face.FaceRectangle);
-
-                    faceProcessing = false;
-                    return faceRects.ToArray();
-
-                }
-                catch (Exception)
-                {
-                    faceProcessing = false;
-                    return new FaceRectangle[0];
-                }
-            }
-            return new FaceRectangle[0];
-        }
+        
 
         /// <summary>
         /// Handles the user clicking on the screenshot button
@@ -331,21 +369,29 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
         /// <summary>
         /// Do the face detction and draw the rectangle of the faces
         /// </summary>
-        private async void faceDetecting()
+        private void faceDetecting()
         {
-            
             if (enableFaceDetect)
             {
-                Title = "Detecting...";
-               
-                FaceRectangle[] faceRects = await UploadAndDetectFaces();
-                Title = String.Format("Detection Finished. {0} face(s) detected", faceRects.Length);
+                faceDetector?.DetectFaces(this.infraredBitmap);
 
-                if (faceRects.Length > 0)
+                Title = "Detecting..."; 
+            }
+        }
+
+        public void DetectedFaces(Face[] faces, Emotion[] emotions)
+        {
+            Title = String.Format("Detection Finished. {0} face(s) detected", faces?.Length);
+
+            if (faces?.Length > 0)
+            {
+                foreach (var face in faces)
                 {
-                    foreach (var faceRect in faceRects)
+                    DrawRect(face.FaceRectangle);
+
+                    if (face.FaceAttributes != null)
                     {
-                        DrawRect(faceRect);
+                        DrawLine(face.FaceRectangle.Left + 2, face.FaceRectangle.Top + 2, face.FaceAttributes.Gender + " : " + face.FaceAttributes.Age);
                     }
                 }
             }
@@ -365,6 +411,17 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
             Canvas.SetLeft(faceBoundingBox, face.Left);
             Canvas.SetTop(faceBoundingBox,face.Top);
             faceCanvas.Children.Add(faceBoundingBox);
+        }
+
+        private void DrawLine(double x,double y,string text)
+        {
+            TextBlock lineObj = new TextBlock();
+            lineObj.Foreground = new SolidColorBrush(Colors.Cyan);
+            lineObj.Text = text;
+            Canvas.SetLeft(lineObj, x);
+            Canvas.SetTop(lineObj, y);
+
+            faceCanvas.Children.Add(lineObj);
         }
 
         /// <summary>
@@ -412,5 +469,114 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
             this.StatusText = this.kinectSensor.IsAvailable ? Properties.Resources.RunningStatusText
                                                             : Properties.Resources.SensorNotAvailableStatusText;
         }
+
+
+        /// <summary>
+        /// Handles the face frame data arriving from the sensor
+        /// </summary>
+        /// <param name="sender">object sending the event</param>
+        /// <param name="e">event arguments</param>
+        private void Reader_FaceFrameArrived(object sender, FaceFrameArrivedEventArgs e)
+        {
+            using (FaceFrame faceFrame = e.FrameReference.AcquireFrame())
+            {
+                if (faceFrame != null)
+                {
+                    // get the index of the face source from the face source array
+                    int index = this.GetFaceSourceIndex(faceFrame.FaceFrameSource);
+
+                    // check if this face frame has valid face frame results
+                    if (this.ValidateFaceBoxAndPoints(faceFrame.FaceFrameResult))
+                    {
+                        // store this face frame result to draw later
+                        this.faceFrameResults[index] = faceFrame.FaceFrameResult;
+
+                        RectI oldFace = faceFrame.FaceFrameResult.FaceBoundingBoxInColorSpace;
+
+                        FaceRectangle newface = new FaceRectangle();
+                        newface.Left   = oldFace.Left;
+                        newface.Top    = oldFace.Top;
+                        newface.Height = (oldFace.Top - oldFace.Bottom);
+                        newface.Width  = (oldFace.Left - oldFace.Right);
+
+                        DrawRect(newface);
+                    }
+                    else
+                    {
+                        // indicates that the latest face frame result from this reader is invalid
+                        this.faceFrameResults[index] = null;
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Returns the index of the face frame source
+        //// <param name="faceFrameSource">the face frame source</param>
+        // </summary>
+        /// <returns>the index of the face source in the face source array</returns>
+        private int GetFaceSourceIndex(FaceFrameSource faceFrameSource)
+        {
+            int index = -1;
+
+            for (int i = 0; i < this.bodyCount; i++)
+            {
+                if (this.faceFrameSources[i] == faceFrameSource)
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            return index;
+        }
+
+        /// <summary>
+        /// Validates face bounding box and face points to be within screen space
+        /// </summary>
+        /// <param name="faceResult">the face frame result containing face box and points</param>
+        /// <returns>success or failure</returns>
+        private bool ValidateFaceBoxAndPoints(FaceFrameResult faceResult)
+        {
+            bool isFaceValid = faceResult != null;
+
+            if (isFaceValid)
+            {
+                var faceBox = faceResult.FaceBoundingBoxInColorSpace;
+                if (faceBox != null)
+                {
+                    // check if we have a valid rectangle within the bounds of the screen space
+                    isFaceValid = (faceBox.Right - faceBox.Left) > 0 &&
+                                  (faceBox.Bottom - faceBox.Top) > 0 &&
+                                  faceBox.Right <= this.infraredFrameDescription.Width &&
+                                  faceBox.Bottom <= this.infraredFrameDescription.Height;
+
+                    if (isFaceValid)
+                    {
+                        var facePoints = faceResult.FacePointsInColorSpace;
+                        if (facePoints != null)
+                        {
+                            foreach (PointF pointF in facePoints.Values)
+                            {
+                                // check if we have a valid face point within the bounds of the screen space
+                                bool isFacePointValid = pointF.X > 0.0f &&
+                                                        pointF.Y > 0.0f &&
+                                                        pointF.X < this.infraredFrameDescription.Width &&
+                                                        pointF.Y < this.infraredFrameDescription.Height;
+
+                                if (!isFacePointValid)
+                                {
+                                    isFaceValid = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return isFaceValid;
+        }
+
     }
 }
