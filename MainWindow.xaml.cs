@@ -79,8 +79,8 @@ namespace Microsoft.Samples.Kinect.InfraredBasics
         /// Face API key
         /// https://www.microsoft.com/cognitive-services/
         /// </summary>
-        private string faceAPIKey = "6171d608d75f4e47b0a836d16898c1f7";
-        private string emotionAPIKey = "df245a9e77ac4a129b9f21080aa1ee43";
+        private string faceAPIKey = "";
+        private string emotionAPIKey = "";
 
         private FaceDetector faceDetector;
 
